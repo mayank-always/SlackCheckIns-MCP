@@ -2,4 +2,12 @@ node_modules/
 .env
 .DS_Store
 coverage/
+__pycache__/
+*.py[cod]
+*.db
+.venv/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
 

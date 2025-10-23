@@ -1,197 +1,144 @@
-# Slack Check-in Analysis MCP
+# Slack Pulse API
 
-Slack Check-in Analysis MCP is a reference implementation of the check-in analytics platform described in the project brief. It exposes an HTTP API for retrieving channel messages from Slack and layers an AI-ready analysis agent on top of those messages to answer operational questions, rate check-in quality, and generate dashboards.
+Slack Pulse API is a combined FastAPI + MCP service that ingests daily check-ins
+from a Slack channel, classifies the quality of each update, tracks absentees,
+and exposes the results through secured REST endpoints and MCP tools for AI
+agents.
 
-## Features
+## Key Features
 
-- **/api/checkins** endpoint that streams messages from a Slack channel into normalized JSON payloads.
-- Intelligent **check-in quality classification** based on completeness, clarity, and specificity heuristics.
-- **Agent endpoints** for natural-language-style queries and automated dashboard generation (daily, weekly, monthly).
-- Modular service layer that can be extended with LLM integrations for richer reasoning workflows.
+- **Slack ingestion** via `conversations.history` with pagination and roster
+  hydration through `users.list`.
+- **Quality scoring** using heuristics for length, keywords, and structure.
+- **SQLite persistence** for users, check-ins, absentees, and summary rollups.
+- **FastAPI endpoints** protected with an `X-API-Key` header.
+- **MCP tools** (`slack-pulse`) for copilots that need programmatic access to the
+data.
+- **Replit-ready** configuration for one-click deployment.
 
-## Prerequisites
+## Environment Variables
 
-- Node.js 18+
-- A Slack Workspace with a bot token that has the `conversations.history`, `users:read`, and `users:read.email` scopes.
+| Variable | Description |
+| --- | --- |
+| `SLACK_BOT_TOKEN` | Bot token with `channels:history`, `channels:read`, `users:read`. |
+| `CHANNEL_ID` | Slack channel ID to monitor (e.g., `C1234567890`). |
+| `API_KEY` | Shared secret for REST API access (`X-API-Key` header). |
+| `DATABASE_URL` | Optional path to SQLite file (default `slack_pulse.db`). |
+| `SYNC_INTERVAL_SECONDS` | Optional polling cadence (default 300 seconds). |
 
-## Getting Started
+A `.env.example` file is included. When running locally, copy it to `.env` or
+export the variables manually.
 
-1. Install dependencies:
+## Slack App Setup
 
- ```bash
-  npm install
-  ```
+1. Visit <https://api.slack.com/apps> and create a new app **from scratch**.
+2. In **OAuth & Permissions**, add the bot scopes `channels:history`,
+   `channels:read`, and `users:read`.
+3. Install the app to your workspace and copy the **Bot User OAuth Token**.
+4. Invite the bot to the target channel (e.g., `/invite @Slack Pulse`).
+5. Capture the channel ID (Right click channel → **Copy channel ID**).
 
-2. Create an `.env` file with the following variables:
+## One-Click Deployment on Replit
 
-  ```bash
-  SLACK_BOT_TOKEN=xoxb-...
-  PORT=3000 # optional
-  ```
+1. Click **Create Repl → Import from GitHub** and point to this repository.
+2. Replit detects `replit.nix` and provisions Python 3.11 automatically.
+3. In the Replit left sidebar, open **Secrets** and add:
+   - `SLACK_BOT_TOKEN`
+   - `CHANNEL_ID`
+   - `API_KEY`
+   - (optional) `DATABASE_URL`, `SYNC_INTERVAL_SECONDS`
+4. Press **Run**. The `.replit` profile installs `requirements.txt` and launches
+   `uvicorn server:app --host=0.0.0.0 --port=8000`.
+5. Once bootstrapped, click the **Open in new tab** button to view the service.
+6. Validate the deployment:
+   - `GET https://<your-repl>.repl.co/healthz`
+   - `GET https://<your-repl>.repl.co/api/daily-checkins` with header
+     `X-API-Key: <API_KEY>`
 
-3. Start the service:
+The background task automatically syncs Slack every `SYNC_INTERVAL_SECONDS`
+seconds. You can force a refresh with `POST /api/refresh`.
 
-  ```bash
-  npm start
-  ```
+## Local Development
 
-  The API will be available at `http://localhost:3000`.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn server:app --host=0.0.0.0 --port=8000
+```
 
-## Turning the Service into a Slack App
+## REST API Overview
 
-The API expects a Slack Bot Token that can read messages from the target check-in channel.
-Follow these steps to provision the token:
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/healthz` | Service readiness probe. |
+| `GET` | `/api/daily-checkins` | Today’s check-ins. |
+| `GET` | `/api/absentees?date=YYYY-MM-DD` | Absentees for a date (default today). |
+| `GET` | `/api/checkin?user=<id>&date=YYYY-MM-DD` | Specific user’s entry. |
+| `GET` | `/api/summary/day` | Daily totals and % good. |
+| `GET` | `/api/summary/week` | Weekly per-user engagement stats. |
+| `GET` | `/api/summary/month` | 30-day aggregate with trend series. |
+| `POST` | `/api/refresh` | Triggers an immediate Slack sync. |
 
-1. Visit <https://api.slack.com/apps> and click **Create New App → From scratch**.
-2. Name the app (e.g., `Check-in MCP`) and choose the workspace that hosts your
-   check-in channel.
-3. In the app configuration sidebar, open **OAuth & Permissions** and add the
-   following **Bot Token Scopes**:
-   - `channels:history` *(or `conversations.history` if using the newer Conversations API)*
-   - `channels:read`
-   - `users:read`
-   - `users:read.email`
-4. Click **Install to Workspace** and authorize the app. Slack will generate a
-   `Bot User OAuth Token` that begins with `xoxb-`. Copy this token into your
-   `.env` file as `SLACK_BOT_TOKEN`.
-5. Invite the bot user to the channel that contains daily check-ins, e.g.
-   `/invite @check-in-mcp` inside Slack. Without this step, the token will not be
-   able to read channel history.
+All `/api/*` routes require the `X-API-Key` header.
 
-Once these steps are complete you can call `GET /api/checkins` with the channel
-ID (press `Ctrl+Shift+I` in Slack desktop → **Channels** → **Copy channel ID**) to
-pull the raw dataset for MCP analysis.
+## MCP Usage
 
-> **Tip:** For production you may prefer to create a dedicated Slack workspace
-> or user group so that MCP analysis stays scoped to the relevant cohort.
+The MCP server is defined in `server.py` using `FastMCP("slack-pulse")` and
+exposes the following tools:
 
-## Deploying the API
+- `get_daily_checkins()`
+- `get_absentees(date: str | None)`
+- `get_user_checkin(user_id: str, date: str)`
+- `get_cumulative_report(period: str)`
 
-The service is a standard Express application that can run anywhere Node.js 18+
-is available. Below is a reference deployment workflow using Render, but any
-platform (Fly.io, Railway, AWS Elastic Beanstalk, Azure App Service, etc.) will
-work with analogous settings.
+Launch it with the `mcp` CLI:
 
-1. Commit this repository to a Git provider (GitHub, GitLab, Bitbucket).
-2. Create a new **Web Service** on <https://render.com> and connect the repo.
-3. Configure the build and start commands:
-   - Build command: `npm install`
-   - Start command: `npm start`
-4. Set the environment variables in Render → **Environment**:
-   - `SLACK_BOT_TOKEN` with the bot token from the Slack app setup.
-   - `PORT` (optional; Render will inject `PORT`, so you can omit this).
-5. Deploy. Render will provision a public URL where the Express API is hosted.
+```bash
+mcp server server:mcp
+```
 
-### Securing the Deployment
-
-- Restrict the `/api/checkins` endpoint with an API key or Slack signed secret
-  middleware before exposing it broadly.
-- Prefer storing environment variables in a secrets manager (Render Secrets,
-  AWS SSM, etc.) rather than committing them to source control.
-- Consider rate limiting and audit logging if you expect regular automated
-  usage from your MCP agent.
-
-### Connecting the MCP Agent
-
-Once the API is live you can wire your MCP runtime to call the hosted endpoints:
-
-1. Fetch channel history: `GET https://your-domain/api/checkins?channel_id=C123&start_date=...&end_date=...`.
-2. Pass the response `results` array into the agent endpoints:
-   - `POST /api/agent/query` for natural-language questions.
-   - `POST /api/agent/report` for dashboards.
-3. Cache results or persist them in your MCP to avoid re-querying Slack for the
-   same window repeatedly.
-
-For more detailed, step-by-step deployment examples (including Docker-based
-setups and GitHub Actions automations), see [`docs/slack-app-deployment.md`](docs/slack-app-deployment.md).
-
-## API Overview
-
-### Health Check
-
-`GET /health`
-
-Returns `{ "status": "ok" }` to confirm the service is running.
-
-### Retrieve Check-ins
-
-`GET /api/checkins`
-
-Query parameters:
-
-| Name        | Required | Description                                  |
-| ----------- | -------- | -------------------------------------------- |
-| channel_id  | Yes      | Slack channel ID to read from.               |
-| start_date  | Yes      | Start of the reporting window (YYYY-MM-DD).  |
-| end_date    | Yes      | End of the reporting window (YYYY-MM-DD).    |
-
-Example response:
+### Claude Desktop Configuration
 
 ```json
 {
-  "channel_id": "C123",
-  "start_date": "2024-10-01",
-  "end_date": "2024-10-07",
-  "count": 5,
-  "results": [
-    {
-      "message_id": "1727700160.12345",
-      "user_id": "U123",
-      "user_name": "Jane Smith",
-      "timestamp": "2024-10-01T14:22:40.000Z",
-      "message_content": "Yesterday I closed out...",
-      "quality": "Strong"
+  "mcpServers": {
+    "slack-pulse": {
+      "command": "python",
+      "args": [
+        "-m",
+        "mcp",
+        "server",
+        "server:mcp"
+      ],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+        "CHANNEL_ID": "${CHANNEL_ID}",
+        "API_KEY": "${API_KEY}",
+        "DATABASE_URL": "${DATABASE_URL:-slack_pulse.db}",
+        "SYNC_INTERVAL_SECONDS": "${SYNC_INTERVAL_SECONDS:-300}"
+      }
     }
-  ]
+  }
 }
 ```
 
-### Agent Query
+## Data Model
 
-`POST /api/agent/query`
+SQLite tables are created automatically on startup:
 
-Body fields:
+- `users` – Slack roster metadata.
+- `checkins` – Individual check-in records with quality score.
+- `absentees` – Users missing a check-in for a specific date.
+- `sync_state` – Tracks incremental sync progress.
 
-- `question` (string, required): Natural language request.
-- `checkins` (array, required): Check-in objects, e.g. the `results` array from `/api/checkins`.
-- `roster` (array, optional): List of students expected to check in. Accepts strings or objects with `id`/`name`.
+## Testing
 
-The agent currently handles attendance, blocker discovery, check-in quality lookups, and best-progress heuristics for the current ISO week.
+Run a syntax check across the project:
 
-### Agent Dashboard Generation
+```bash
+python -m compileall server.py
+```
 
-`POST /api/agent/report`
-
-Body fields:
-
-- `user` (object, required): `{ "id": "U123", "name": "Jane Smith" }`.
-- `timeframe` (object, required):
-  - `type`: `daily`, `weekly`, or `monthly`.
-  - `date`, `start`, or `month`: Date anchors (YYYY-MM-DD) depending on the report type.
-- `checkins` (array, required): Same structure as above.
-- `roster` (array, optional).
-
-The response includes summaries, average quality scores, blocker highlights, and consistency statistics.
-
-## Extending the Agent
-
-The agent class (`src/agent/checkinAgent.js`) is intentionally modular so you can plug it into an LLM orchestration framework. Feed it normalized check-in data and a roster, then:
-
-- Use `answerQuestion()` for natural-language style prompts.
-- Call `generateDashboard()` to build student-specific reports.
-- Leverage helper methods (`summarizeDaily`, `summarizeWeek`, `extractBlockers`, etc.) within your MCP implementation.
-
-## Development
-
-- Run with live reload: `npm run dev`
-- The repository ships with heuristics for check-in quality; adjust `src/utils/checkinQuality.js` to fine-tune scoring.
-
-## Roadmap Ideas
-
-- Persist check-ins to a database for historical analytics.
-- Integrate with an LLM provider for richer natural language understanding.
-- Build a Slack slash command that proxies requests to the MCP agent.
-
-## License
-
-MIT
+For integration testing, configure Slack credentials and exercise the REST
+endpoints or MCP tools.
